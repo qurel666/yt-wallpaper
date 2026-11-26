@@ -32,14 +32,11 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.*
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.schabi.newpipe.extractor.NewPipe
-import org.schabi.newpipe.extractor.downloader.Downloader
-import org.schabi.newpipe.extractor.downloader.Response
-import org.schabi.newpipe.extractor.localization.Localization
-import org.schabi.newpipe.extractor.stream.StreamInfo
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
@@ -75,11 +72,6 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        try {
-            NewPipe.init(OkHttpDownloader(httpClient), Localization("ru", "RU"))
-        } catch (_: Throwable) {
-        }
-
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -112,7 +104,6 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(26), dp(14), dp(26), dp(14))
         }
 
-        // === ВЕРХНЯЯ КОМПАКТНАЯ ЧАСТЬ + ПРЕВЬЮ В ПРАВОМ ВЕРХНЕМ УГЛУ ===
         val topSection = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -156,7 +147,6 @@ class MainActivity : AppCompatActivity() {
         })
         controlsCol.addView(urlInput)
 
-        // Компактная строка управления
         val actionRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -254,7 +244,6 @@ class MainActivity : AppCompatActivity() {
 
         topSection.addView(controlsCol)
 
-        // Правый верхний прямоугольник превью (16:9)
         val previewBox = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(dp(220), dp(124))
             background = GradientDrawable().apply {
@@ -288,7 +277,6 @@ class MainActivity : AppCompatActivity() {
 
         root.addView(topSection)
 
-        // === ВЫДЕЛЕННАЯ НИЖНЯЯ ОБЛАСТЬ (6 ВИДЕО: 2 РЯДА ПО 3) ===
         val bottomPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(8), dp(12), dp(8))
@@ -358,14 +346,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun extractYoutubeId(url: String): String? {
         val patterns = listOf(
-            "(?:v=|/)([0-9A-Za-z_-]{11}).*",
             "youtu\\.be/([0-9A-Za-z_-]{11})",
-            "shorts/([0-9A-Za-z_-]{11})"
+            "[?&]v=([0-9A-Za-z_-]{11})",
+            "shorts/([0-9A-Za-z_-]{11})",
+            "embed/([0-9A-Za-z_-]{11})"
         )
         for (p in patterns) {
             val m = Pattern.compile(p).matcher(url)
             if (m.find()) return m.group(1)
         }
+        val trimmed = url.trim()
+        if (trimmed.matches(Regex("[0-9A-Za-z_-]{11}"))) return trimmed
         return null
     }
 
@@ -606,8 +597,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun startProcess() {
         val url = urlInput.text.toString().trim()
-        if (url.isEmpty()) {
-            statusText.text = "Ошибка: вставь ссылку на YouTube."
+        val videoId = extractYoutubeId(url)
+        if (videoId == null) {
+            statusText.text = "Ошибка: не удалось распознать ссылку на YouTube."
             return
         }
 
@@ -627,14 +619,18 @@ class MainActivity : AppCompatActivity() {
             try {
                 updateStatus("1/4 Получаю потоки видео с YouTube...")
                 val streamData = withContext(Dispatchers.IO) {
-                    extractStreams(url, targetHeight)
+                    extractStreamsDirect(videoId, targetHeight)
                 }
 
                 updateStatus("2/4 Скачиваю видео (${streamData.resolution} H.264)...")
-                withContext(Dispatchers.IO) { downloadFile(streamData.videoUrl, tempVideo) }
+                withContext(Dispatchers.IO) {
+                    downloadFile(streamData.videoUrl, tempVideo, streamData.userAgent)
+                }
 
                 updateStatus("3/4 Скачиваю звук (AAC)...")
-                withContext(Dispatchers.IO) { downloadFile(streamData.audioUrl, tempAudio) }
+                withContext(Dispatchers.IO) {
+                    downloadFile(streamData.audioUrl, tempAudio, streamData.userAgent)
+                }
 
                 val safeTitle = streamData.title
                     .replace(Regex("[^a-zA-Zа-яА-Я0-9_\\- ]"), "")
@@ -671,44 +667,137 @@ class MainActivity : AppCompatActivity() {
         val videoUrl: String,
         val audioUrl: String,
         val resolution: String,
-        val title: String
+        val title: String,
+        val userAgent: String
     )
 
-    private fun extractStreams(url: String, maxHeight: Int): ExtractedStreams {
-        val info = StreamInfo.getInfo(NewPipe.getService(0), url)
+    private data class StreamCandidate(
+        val url: String,
+        val height: Int,
+        val fps: Int,
+        val bitrate: Int,
+        val isAvc: Boolean
+    )
 
-        val mp4Videos = info.videoOnlyStreams.filter {
-            it.format?.mimeType?.contains("mp4", ignoreCase = true) == true &&
-                    (it.codec?.contains("avc", ignoreCase = true) == true || it.codec == null)
-        }
-        val bestVideo = mp4Videos
-            .filter { it.height <= maxHeight }
-            .maxWithOrNull(compareBy({ it.height }, { it.fps }, { it.bitrate }))
-            ?: mp4Videos.maxByOrNull { it.height }
-            ?: info.videoStreams.maxByOrNull { it.height }
-            ?: throw IllegalStateException("Не найден подходящий MP4 видеопоток")
-
-        val bestAudio = info.audioStreams
-            .filter { it.format?.mimeType?.contains("mp4", ignoreCase = true) == true || it.format?.suffix == "m4a" }
-            .maxByOrNull { it.averageBitrate }
-            ?: info.audioStreams.maxByOrNull { it.averageBitrate }
-            ?: throw IllegalStateException("Не найден аудиопоток")
-
-        return ExtractedStreams(
-            videoUrl = bestVideo.content,
-            audioUrl = bestAudio.content,
-            resolution = "${bestVideo.height}p",
-            title = info.name ?: "YT_Video"
+    private fun extractStreamsDirect(videoId: String, maxHeight: Int): ExtractedStreams {
+        val clients = listOf(
+            Triple(
+                "ANDROID_VR",
+                "1.56.21",
+                "com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+            ),
+            Triple(
+                "IOS",
+                "19.45.4",
+                "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)"
+            )
         )
+
+        var lastError = "Не удалось получить потоки"
+
+        for ((clientName, clientVersion, userAgent) in clients) {
+            try {
+                val clientId = if (clientName == "IOS") "5" else "28"
+                val clientObj = JSONObject().apply {
+                    put("clientName", clientName)
+                    put("clientVersion", clientVersion)
+                    put("hl", "ru")
+                    put("gl", "RU")
+                    if (clientName == "ANDROID_VR") {
+                        put("androidSdkVersion", 32)
+                    } else if (clientName == "IOS") {
+                        put("deviceModel", "iPhone16,2")
+                    }
+                }
+                val payload = JSONObject().apply {
+                    put("videoId", videoId)
+                    put("context", JSONObject().put("client", clientObj))
+                    put("contentCheckOk", true)
+                    put("racyCheckOk", true)
+                }
+
+                val request = Request.Builder()
+                    .url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", userAgent)
+                    .header("X-YouTube-Client-Name", clientId)
+                    .header("X-YouTube-Client-Version", clientVersion)
+                    .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+
+                httpClient.newCall(request).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        lastError = "HTTP ${resp.code}"
+                        return@use
+                    }
+                    val bodyStr = resp.body?.string() ?: return@use
+                    val root = JSONObject(bodyStr)
+
+                    val playability = root.optJSONObject("playabilityStatus")
+                    val status = playability?.optString("status", "") ?: ""
+                    if (status != "OK") {
+                        lastError = playability?.optString("reason") ?: "Статус: $status"
+                        return@use
+                    }
+
+                    val title = root.optJSONObject("videoDetails")?.optString("title") ?: "YT_Video"
+                    val adaptive = root.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats")
+                        ?: return@use
+
+                    val videos = mutableListOf<StreamCandidate>()
+                    val audios = mutableListOf<StreamCandidate>()
+
+                    for (i in 0 until adaptive.length()) {
+                        val item = adaptive.getJSONObject(i)
+                        val streamUrl = item.optString("url", "")
+                        if (streamUrl.isEmpty()) continue
+
+                        val mime = item.optString("mimeType", "")
+                        val bitrate = item.optInt("bitrate", 0)
+
+                        if (mime.startsWith("video/mp4")) {
+                            val height = item.optInt("height", 0)
+                            val fps = item.optInt("fps", 30)
+                            val isAvc = mime.contains("avc1", ignoreCase = true)
+                            videos.add(StreamCandidate(streamUrl, height, fps, bitrate, isAvc))
+                        } else if (mime.startsWith("audio/mp4")) {
+                            audios.add(StreamCandidate(streamUrl, 0, 0, bitrate, true))
+                        }
+                    }
+
+                    val avcVideos = videos.filter { it.isAvc }.ifEmpty { videos }
+                    val bestVideo = avcVideos
+                        .filter { it.height <= maxHeight }
+                        .maxWithOrNull(compareBy({ it.height }, { it.fps }, { it.bitrate }))
+                        ?: avcVideos.minByOrNull { it.height }
+
+                    val bestAudio = audios.maxByOrNull { it.bitrate }
+
+                    if (bestVideo != null && bestAudio != null) {
+                        return ExtractedStreams(
+                            videoUrl = bestVideo.url,
+                            audioUrl = bestAudio.url,
+                            resolution = "${bestVideo.height}p",
+                            title = title,
+                            userAgent = userAgent
+                        )
+                    }
+                }
+            } catch (t: Throwable) {
+                lastError = t.message ?: t.javaClass.simpleName
+            }
+        }
+
+        throw IllegalStateException(lastError)
     }
 
-    private fun downloadFile(fileUrl: String, dest: File) {
+    private fun downloadFile(fileUrl: String, dest: File, userAgent: String) {
         val request = Request.Builder()
             .url(fileUrl)
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+            .header("User-Agent", userAgent)
             .build()
         httpClient.newCall(request).execute().use { resp ->
-            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
+            if (!resp.isSuccessful) throw IllegalStateException("Ошибка загрузки: HTTP ${resp.code}")
             val body = resp.body ?: throw IllegalStateException("Пустой ответ сервера")
             body.byteStream().use { input ->
                 FileOutputStream(dest).use { output ->
@@ -812,26 +901,5 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         scope.cancel()
-    }
-
-    private class OkHttpDownloader(private val client: OkHttpClient) : Downloader() {
-        override fun execute(request: org.schabi.newpipe.extractor.downloader.Request): Response {
-            val reqBuilder = Request.Builder().url(request.url())
-            request.headers().forEach { (k, values) ->
-                values.forEach { v -> reqBuilder.addHeader(k, v) }
-            }
-            if (request.httpMethod().equals("POST", ignoreCase = true)) {
-                val bodyBytes = request.dataToSend() ?: ByteArray(0)
-                reqBuilder.post(bodyBytes.toRequestBody(null))
-            }
-            client.newCall(reqBuilder.build()).execute().use { resp ->
-                val respBody = resp.body?.string() ?: ""
-                val headersMap = mutableMapOf<String, List<String>>()
-                resp.headers.names().forEach { name ->
-                    headersMap[name] = resp.headers.values(name)
-                }
-                return Response(resp.code, resp.message, headersMap, respBody, resp.request.url.toString())
-            }
-        }
     }
 }
