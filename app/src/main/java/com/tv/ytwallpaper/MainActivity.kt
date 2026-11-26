@@ -579,17 +579,14 @@ class MainActivity : AppCompatActivity() {
         val uri = FileProvider.getUriForFile(this, "$packageName.provider", file)
         grantUriPermission("com.spocky.projengmenu", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
 
-        updateStatus("Активные обои: ${file.nameWithoutExtension}. Если в Projectivy 4.74 не обновилось — нажми «КЭШ PROJECTIVY».")
-
-        val projectivyIntent = Intent(Intent.ACTION_ATTACH_DATA).apply {
-            setDataAndType(uri, "video/mp4")
+        // Точный сигнал для Projectivy Launcher (взят из SpikeActivity.kt)
+        sendBroadcast(Intent("tv.projectivy.plugin.wallpaperprovider.api.WALLPAPER_PROVIDER_UPDATED").apply {
             setPackage("com.spocky.projengmenu")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        try {
-            startActivity(projectivyIntent)
-        } catch (_: Throwable) {
-        }
+            putExtra("providerId", "c8a91e40-5b2d-4f1a-9c3e-7d6b8a1f2e3d")
+            putExtra("updateReason", 1) // DATA_CHANGED
+        })
+
+        updateStatus("Обои обновлены: ${file.nameWithoutExtension}. Если в Projectivy 4.74 не сменились — нажми «КЭШ PROJECTIVY».")
     }
 
     private fun openProjectivySettings() {
@@ -627,7 +624,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 updateStatus("1/4 Получаю потоки видео с YouTube...")
                 val streamData = withContext(Dispatchers.IO) {
-                    extractStreamsDirect(videoId, targetHeight)
+                    extractStreamsMultiSource(videoId, targetHeight)
                 }
 
                 updateStatus("2/4 Скачиваю видео (${streamData.resolution})...")
@@ -689,6 +686,61 @@ class MainActivity : AppCompatActivity() {
         val isAvc: Boolean
     )
 
+    private fun extractStreamsMultiSource(videoId: String, maxHeight: Int): ExtractedStreams {
+        // 1. Сначала пробуем открытые API-шлюзы (Cobalt / Piped / Invidious), которые сами решают PO Token и отдают чистый MP4 без 403
+        val cobaltInstances = listOf(
+            "https://api.cobalt.tools/",
+            "https://cobalt-api.kwiatekmiki.com/",
+            "https://cobalt.api.timelessnesses.me/"
+        )
+
+        val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+        val webUa = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+        for (apiUrl in cobaltInstances) {
+            try {
+                val payload = JSONObject().apply {
+                    put("url", watchUrl)
+                    put("videoQuality", if (maxHeight >= 1440) "1440" else "1080")
+                    put("youtubeVideoCodec", "h264")
+                    put("downloadMode", "auto")
+                }
+
+                val req = Request.Builder()
+                    .url(apiUrl)
+                    .header("Accept", "application/json")
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", webUa)
+                    .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use
+                    val bodyStr = resp.body?.string() ?: return@use
+                    val json = JSONObject(bodyStr)
+                    val status = json.optString("status", "")
+                    if (status == "tunnel" || status == "redirect") {
+                        val directUrl = json.optString("url", "")
+                        val filename = json.optString("filename", "YT_$videoId").substringBeforeLast(".")
+                        if (directUrl.isNotEmpty()) {
+                            return ExtractedStreams(
+                                videoUrl = directUrl,
+                                audioUrl = null, // Уже со звуком
+                                resolution = "${maxHeight}p",
+                                title = filename,
+                                userAgent = webUa
+                            )
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+            }
+        }
+
+        // 2. Резервный вариант: прямой InnerTube (MWEB + TVHTML5) с получением visitorData
+        return extractStreamsInnerTube(videoId, maxHeight)
+    }
+
     private fun fetchVisitorData(userAgent: String, clientName: String, clientVersion: String): String? {
         return try {
             val payload = JSONObject().put(
@@ -719,56 +771,33 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun extractStreamsDirect(videoId: String, maxHeight: Int): ExtractedStreams {
+    private fun extractStreamsInnerTube(videoId: String, maxHeight: Int): ExtractedStreams {
         data class ClientProfile(
             val name: String,
             val id: String,
             val version: String,
             val userAgent: String,
-            val deviceMake: String?,
-            val deviceModel: String?,
-            val osName: String?,
-            val osVersion: String?,
-            val sdkVersion: Int?
+            val isEmbedded: Boolean
         )
 
         val clients = listOf(
             ClientProfile(
-                name = "ANDROID_VR",
-                id = "28",
-                version = "1.60.19",
-                userAgent = "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; Quest 3 Build/SQ3A.220605.009.A1) gzip",
-                deviceMake = "Oculus",
-                deviceModel = "Quest 3",
-                osName = "Android",
-                osVersion = "12L",
-                sdkVersion = 32
+                name = "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+                id = "85",
+                version = "2.0",
+                userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                isEmbedded = true
             ),
             ClientProfile(
-                name = "IOS",
-                id = "5",
-                version = "20.10.4",
-                userAgent = "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_1 like Mac OS X;)",
-                deviceMake = "Apple",
-                deviceModel = "iPhone16,2",
-                osName = "iOS",
-                osVersion = "18.3.1.22D72",
-                sdkVersion = null
-            ),
-            ClientProfile(
-                name = "ANDROID_TESTSUITE",
-                id = "30",
-                version = "1.9",
-                userAgent = "com.google.android.youtube/1.9 (Linux; U; Android 11; en_US) gzip",
-                deviceMake = "Google",
-                deviceModel = "Pixel 5",
-                osName = "Android",
-                osVersion = "11",
-                sdkVersion = 30
+                name = "MWEB",
+                id = "2",
+                version = "2.20250213.01.00",
+                userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1",
+                isEmbedded = false
             )
         )
 
-        var lastError = "Не удалось получить потоки с YouTube"
+        var lastError = "Не удалось получить потоки (YouTube заблокировал запрос)"
 
         for (profile in clients) {
             try {
@@ -779,17 +808,20 @@ class MainActivity : AppCompatActivity() {
                     put("clientVersion", profile.version)
                     put("hl", "ru")
                     put("gl", "RU")
-                    if (profile.deviceMake != null) put("deviceMake", profile.deviceMake)
-                    if (profile.deviceModel != null) put("deviceModel", profile.deviceModel)
-                    if (profile.osName != null) put("osName", profile.osName)
-                    if (profile.osVersion != null) put("osVersion", profile.osVersion)
-                    if (profile.sdkVersion != null) put("androidSdkVersion", profile.sdkVersion)
                     if (!visitorData.isNullOrEmpty()) put("visitorData", visitorData)
+                }
+
+                val contextObj = JSONObject().put("client", clientObj)
+                if (profile.isEmbedded) {
+                    contextObj.put(
+                        "thirdParty",
+                        JSONObject().put("embedUrl", "https://www.youtube.com/embed/$videoId")
+                    )
                 }
 
                 val payload = JSONObject().apply {
                     put("videoId", videoId)
-                    put("context", JSONObject().put("client", clientObj))
+                    put("context", contextObj)
                     put("contentCheckOk", true)
                     put("racyCheckOk", true)
                 }
@@ -812,12 +844,7 @@ class MainActivity : AppCompatActivity() {
                 httpClient.newCall(request).execute().use { resp ->
                     val bodyStr = resp.body?.string() ?: ""
                     if (!resp.isSuccessful) {
-                        val apiMsg = try {
-                            JSONObject(bodyStr).optJSONObject("error")?.optString("message")
-                        } catch (_: Throwable) {
-                            null
-                        }
-                        lastError = if (!apiMsg.isNullOrEmpty()) "HTTP ${resp.code}: $apiMsg" else "HTTP ${resp.code}"
+                        lastError = "HTTP ${resp.code}"
                         return@use
                     }
 
@@ -854,7 +881,6 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
 
-                    // Приоритет H.264 (avc1), так как чипы ТВ на Android 9 аппаратно декодируют его без тормозов
                     val avcVideos = videos.filter { it.isAvc }.ifEmpty { videos }
                     val bestVideo = avcVideos
                         .filter { it.height <= maxHeight }
@@ -885,6 +911,8 @@ class MainActivity : AppCompatActivity() {
         val request = Request.Builder()
             .url(fileUrl)
             .header("User-Agent", userAgent)
+            .header("Referer", "https://www.youtube.com/")
+            .header("Origin", "https://www.youtube.com")
             .header("Accept", "*/*")
             .header("Accept-Encoding", "identity")
             .build()
@@ -923,6 +951,14 @@ class MainActivity : AppCompatActivity() {
                     val aFormat = audioExtractor.getTrackFormat(aTrackSrc)
                     aTrackDst = muxer.addTrack(aFormat)
                 }
+            } else {
+                // Если файл уже совмещённый (видео + звук в одном файле, например из Cobalt)
+                aTrackSrc = findTrack(videoExtractor, "audio/")
+                if (aTrackSrc >= 0) {
+                    videoExtractor.selectTrack(aTrackSrc)
+                    val aFormat = videoExtractor.getTrackFormat(aTrackSrc)
+                    aTrackDst = muxer.addTrack(aFormat)
+                }
             }
 
             muxer.start()
@@ -934,27 +970,42 @@ class MainActivity : AppCompatActivity() {
             val bufferInfo = MediaCodec.BufferInfo()
 
             var lastVideoPts = -1L
+            var lastAudioPts = -1L
+
             while (true) {
+                val trackIdx = videoExtractor.sampleTrackIndex
+                if (trackIdx < 0) break
                 val sampleSize = videoExtractor.readSampleData(buffer, 0)
                 if (sampleSize < 0) break
                 val sampleTime = videoExtractor.sampleTime
                 if (sampleTime > endUs) break
 
-                var pts = (sampleTime - actualStartUs).coerceAtLeast(0L)
-                if (pts <= lastVideoPts) pts = lastVideoPts + 1000L
-                lastVideoPts = pts
+                if (trackIdx == vTrackSrc) {
+                    var pts = (sampleTime - actualStartUs).coerceAtLeast(0L)
+                    if (pts <= lastVideoPts) pts = lastVideoPts + 1000L
+                    lastVideoPts = pts
 
-                bufferInfo.offset = 0
-                bufferInfo.size = sampleSize
-                bufferInfo.presentationTimeUs = pts
-                bufferInfo.flags = videoExtractor.sampleFlags
-                muxer.writeSampleData(vTrackDst, buffer, bufferInfo)
+                    bufferInfo.offset = 0
+                    bufferInfo.size = sampleSize
+                    bufferInfo.presentationTimeUs = pts
+                    bufferInfo.flags = videoExtractor.sampleFlags
+                    muxer.writeSampleData(vTrackDst, buffer, bufferInfo)
+                } else if (audioExtractor == null && trackIdx == aTrackSrc && aTrackDst >= 0 && sampleTime >= actualStartUs) {
+                    var pts = sampleTime - actualStartUs
+                    if (pts <= lastAudioPts) pts = lastAudioPts + 1000L
+                    lastAudioPts = pts
+
+                    bufferInfo.offset = 0
+                    bufferInfo.size = sampleSize
+                    bufferInfo.presentationTimeUs = pts
+                    bufferInfo.flags = videoExtractor.sampleFlags
+                    muxer.writeSampleData(aTrackDst, buffer, bufferInfo)
+                }
                 videoExtractor.advance()
             }
 
             if (audioExtractor != null && aTrackSrc >= 0 && aTrackDst >= 0) {
                 audioExtractor.seekTo(actualStartUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-                var lastAudioPts = -1L
                 while (true) {
                     val sampleSize = audioExtractor.readSampleData(buffer, 0)
                     if (sampleSize < 0) break
