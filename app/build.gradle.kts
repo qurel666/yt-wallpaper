@@ -8,12 +8,6 @@ import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 
-buildscript {
-    dependencies {
-        classpath("org.ow2.asm:asm:9.7")
-    }
-}
-
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
