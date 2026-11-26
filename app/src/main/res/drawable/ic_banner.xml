@@ -6,10 +6,6 @@
     android:viewportHeight="180">
 
     <path
-        android:fillColor="#0F172A"
-        android:pathData="M0,0 L320,0 L320,180 L0,180 Z" />
-
-    <path
         android:fillColor="#00000000"
         android:strokeColor="#3B82F6"
         android:strokeWidth="6"
