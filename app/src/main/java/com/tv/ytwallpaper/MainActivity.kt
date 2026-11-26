@@ -1,9 +1,12 @@
 package com.tv.ytwallpaper
 
 import android.Manifest
+import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -13,6 +16,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.view.Gravity
+import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -30,6 +34,9 @@ import org.schabi.newpipe.extractor.stream.StreamInfo
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
@@ -41,6 +48,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var res1440Radio: RadioButton
     private lateinit var runButton: Button
     private lateinit var statusText: TextView
+    private lateinit var historyContainer: LinearLayout
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val httpClient = OkHttpClient.Builder()
@@ -51,7 +59,10 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        NewPipe.init(OkHttpDownloader(httpClient), Localization("ru", "RU"))
+        try {
+            NewPipe.init(OkHttpDownloader(httpClient), Localization("ru", "RU"))
+        } catch (_: Throwable) {
+        }
 
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
@@ -60,30 +71,42 @@ class MainActivity : AppCompatActivity() {
         }
 
         buildTvUi()
+        refreshHistoryList()
+    }
+
+    private fun getWallpapersDir(): File {
+        return File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
+            "ProjectivyWallpapers"
+        ).apply { mkdirs() }
     }
 
     private fun buildTvUi() {
+        val scroll = ScrollView(this).apply {
+            setBackgroundColor(Color.parseColor("#121417"))
+            isFillViewport = true
+        }
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#121417"))
-            setPadding(64, 48, 64, 48)
+            setPadding(56, 36, 56, 36)
             gravity = Gravity.CENTER_HORIZONTAL
         }
 
         val title = TextView(this).apply {
             text = "YouTube Видеообои для Projectivy (H.264 + Звук)"
-            textSize = 24f
+            textSize = 22f
             setTextColor(Color.WHITE)
-            setPadding(0, 0, 0, 24)
+            setPadding(0, 0, 0, 18)
         }
         root.addView(title)
 
-        urlInput = createInput("Ссылка на YouTube (например https://youtu.be/...)")
+        urlInput = createInput("Вставь ссылку на YouTube (https://youtu.be/...)")
         root.addView(urlInput)
 
         val timeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 16, 0, 16)
+            setPadding(0, 12, 0, 12)
         }
         startInput = createInput("Начало (00:00)").apply {
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
@@ -99,19 +122,19 @@ class MainActivity : AppCompatActivity() {
 
         val radioGroup = RadioGroup(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 8, 0, 24)
+            setPadding(0, 4, 0, 16)
         }
         res1080Radio = RadioButton(this).apply {
             text = "1080p (Full HD, плавно на 2 ГБ ОЗУ)"
             setTextColor(Color.WHITE)
-            textSize = 16f
+            textSize = 15f
             isChecked = true
             setPadding(0, 0, 32, 0)
         }
         res1440Radio = RadioButton(this).apply {
             text = "1440p (2K)"
             setTextColor(Color.WHITE)
-            textSize = 16f
+            textSize = 15f
         }
         radioGroup.addView(res1080Radio)
         radioGroup.addView(res1440Radio)
@@ -119,25 +142,67 @@ class MainActivity : AppCompatActivity() {
 
         runButton = Button(this).apply {
             text = "СКАЧАТЬ, ОБРЕЗАТЬ И УСТАНОВИТЬ"
-            textSize = 18f
-            setBackgroundColor(Color.parseColor("#2563EB"))
+            textSize = 16f
             setTextColor(Color.WHITE)
-            setPadding(32, 20, 32, 20)
+            setPadding(36, 18, 36, 18)
             isFocusable = true
+            applyFocusStyle(this, "#2563EB", "#3B82F6")
             setOnClickListener { startProcess() }
         }
         root.addView(runButton)
 
         statusText = TextView(this).apply {
-            text = "Готово к работе. Файл сохраняется в /Movies/ProjectivyWallpapers/wallpaper.mp4"
-            textSize = 15f
+            text = "Готово к работе. Папка: /Movies/ProjectivyWallpapers/"
+            textSize = 14f
             setTextColor(Color.parseColor("#9CA3AF"))
-            setPadding(0, 28, 0, 0)
+            setPadding(0, 18, 0, 20)
         }
         root.addView(statusText)
 
-        setContentView(root)
+        // Разделитель и заголовок истории
+        val historyTitle = TextView(this).apply {
+            text = "Последние 5 скачанных видео (нажми пультом для установки):"
+            textSize = 16f
+            setTextColor(Color.parseColor("#E5E7EB"))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = 8
+                bottomMargin = 10
+            }
+        }
+        root.addView(historyTitle)
+
+        historyContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        root.addView(historyContainer)
+
+        scroll.addView(root)
+        setContentView(scroll)
         urlInput.requestFocus()
+    }
+
+    private fun applyFocusStyle(view: View, normalHex: String, focusedHex: String) {
+        val normalBg = GradientDrawable().apply {
+            setColor(Color.parseColor(normalHex))
+            cornerRadius = 12f
+            setStroke(2, Color.parseColor("#374151"))
+        }
+        val focusedBg = GradientDrawable().apply {
+            setColor(Color.parseColor(focusedHex))
+            cornerRadius = 12f
+            setStroke(4, Color.parseColor("#60A5FA"))
+        }
+        view.background = normalBg
+        view.setOnFocusChangeListener { v, hasFocus ->
+            v.background = if (hasFocus) focusedBg else normalBg
+        }
     }
 
     private fun createInput(hintText: String): EditText {
@@ -145,12 +210,72 @@ class MainActivity : AppCompatActivity() {
             hint = hintText
             setHintTextColor(Color.parseColor("#6B7280"))
             setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#1F2937"))
-            setPadding(24, 20, 24, 20)
-            textSize = 16f
+            setPadding(22, 16, 22, 16)
+            textSize = 15f
             isSingleLine = true
             isFocusable = true
+            applyFocusStyle(this, "#1F2937", "#263244")
         }
+    }
+
+    private fun refreshHistoryList() {
+        historyContainer.removeAllViews()
+        val files = getWallpapersDir()
+            .listFiles { f -> f.isFile && f.extension.equals("mp4", ignoreCase = true) }
+            ?.sortedByDescending { it.lastModified() }
+            ?: emptyList()
+
+        // Оставляем только 5 самых свежих, остальные удаляем
+        if (files.size > 5) {
+            files.drop(5).forEach { try { it.delete() } catch (_: Throwable) {} }
+        }
+
+        val top5 = files.take(5)
+        if (top5.isEmpty()) {
+            val emptyLabel = TextView(this).apply {
+                text = "Пока нет скачанных видео"
+                textSize = 14f
+                setTextColor(Color.parseColor("#6B7280"))
+                setPadding(16, 12, 16, 12)
+            }
+            historyContainer.addView(emptyLabel)
+            return
+        }
+
+        val dateFormat = SimpleDateFormat("dd.MM HH:mm", Locale.getDefault())
+        top5.forEachIndexed { index, file ->
+            val sizeMb = String.format(Locale.US, "%.1f МБ", file.length() / (1024.0 * 1024.0))
+            val dateStr = dateFormat.format(Date(file.lastModified()))
+
+            val itemBtn = TextView(this).apply {
+                text = "${index + 1}.  ${file.nameWithoutExtension}   •   $sizeMb   •   $dateStr"
+                textSize = 15f
+                setTextColor(Color.WHITE)
+                setPadding(24, 18, 24, 18)
+                isFocusable = true
+                isClickable = true
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    bottomMargin = 10
+                }
+                applyFocusStyle(this, "#1F2937", "#1D4ED8")
+                setOnClickListener { showVideoActionDialog(file) }
+            }
+            historyContainer.addView(itemBtn)
+        }
+    }
+
+    private fun showVideoActionDialog(file: File) {
+        AlertDialog.Builder(this)
+            .setTitle(file.nameWithoutExtension)
+            .setMessage("Установить это видео как обои в Projectivy Launcher?")
+            .setPositiveButton("Установить как обои") { _, _ ->
+                applyToProjectivy(file)
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
     }
 
     private fun startProcess() {
@@ -175,51 +300,65 @@ class MainActivity : AppCompatActivity() {
             val tempAudio = File(cacheDir, "temp_a.m4a")
             try {
                 updateStatus("1/4 Получаю потоки видео с YouTube...")
-                val (videoUrl, audioUrl, actualRes) = withContext(Dispatchers.IO) {
+                val streamData = withContext(Dispatchers.IO) {
                     extractStreams(url, targetHeight)
                 }
 
-                updateStatus("2/4 Скачиваю видео ($actualRes H.264)...")
-                withContext(Dispatchers.IO) { downloadFile(videoUrl, tempVideo) }
+                updateStatus("2/4 Скачиваю видео (${streamData.resolution} H.264)...")
+                withContext(Dispatchers.IO) { downloadFile(streamData.videoUrl, tempVideo) }
 
                 updateStatus("3/4 Скачиваю звук (AAC)...")
-                withContext(Dispatchers.IO) { downloadFile(audioUrl, tempAudio) }
+                withContext(Dispatchers.IO) { downloadFile(streamData.audioUrl, tempAudio) }
 
-                val outDir = File(
-                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
-                    "ProjectivyWallpapers"
-                ).apply { mkdirs() }
-                val outFile = File(outDir, "wallpaper.mp4")
-                if (outFile.exists()) outFile.delete()
+                val safeTitle = streamData.title
+                    .replace(Regex("[^a-zA-Zа-яА-Я0-9_\\- ]"), "")
+                    .trim()
+                    .take(28)
+                    .ifEmpty { "wallpaper" }
+                val stamp = SimpleDateFormat("HHmmss", Locale.getDefault()).format(Date())
+                val outFile = File(getWallpapersDir(), "${safeTitle}_$stamp.mp4")
 
                 updateStatus("4/4 Обрезаю (${startSec}с — ${endSec}с) и склеиваю со звуком...")
                 withContext(Dispatchers.IO) {
-                    trimAndMux(tempVideo.absolutePath, tempAudio.absolutePath, outFile.absolutePath, startSec * 1_000_000L, endSec * 1_000_000L)
+                    trimAndMux(
+                        tempVideo.absolutePath,
+                        tempAudio.absolutePath,
+                        outFile.absolutePath,
+                        startSec * 1_000_000L,
+                        endSec * 1_000_000L
+                    )
                 }
 
                 MediaScannerConnection.scanFile(this@MainActivity, arrayOf(outFile.absolutePath), arrayOf("video/mp4"), null)
-                updateStatus("Готово! Применяю обои в Projectivy Launcher...")
+                refreshHistoryList()
+                updateStatus("Готово! Открываю установку обоев в Projectivy...")
                 applyToProjectivy(outFile)
-            } catch (e: Exception) {
-                updateStatus("Ошибка: ${e.message ?: e.javaClass.simpleName}")
+            } catch (t: Throwable) {
+                updateStatus("Ошибка: ${t.message ?: t.javaClass.simpleName}")
             } finally {
-                tempVideo.delete()
-                tempAudio.delete()
+                try { tempVideo.delete() } catch (_: Throwable) {}
+                try { tempAudio.delete() } catch (_: Throwable) {}
                 runButton.isEnabled = true
             }
         }
     }
 
-    private fun extractStreams(url: String, maxHeight: Int): Triple<String, String, String> {
+    private data class ExtractedStreams(
+        val videoUrl: String,
+        val audioUrl: String,
+        val resolution: String,
+        val title: String
+    )
+
+    private fun extractStreams(url: String, maxHeight: Int): ExtractedStreams {
         val info = StreamInfo.getInfo(NewPipe.getService(0), url)
 
-        // Выбираем строго MP4/H.264 (avc1) для аппаратного декодера ТВ
         val mp4Videos = info.videoOnlyStreams.filter {
             it.format?.mimeType?.contains("mp4", ignoreCase = true) == true &&
                     (it.codec?.contains("avc", ignoreCase = true) == true || it.codec == null)
         }
         val bestVideo = mp4Videos
-            .filter { (it.height) <= maxHeight }
+            .filter { it.height <= maxHeight }
             .maxWithOrNull(compareBy({ it.height }, { it.fps }, { it.bitrate }))
             ?: mp4Videos.maxByOrNull { it.height }
             ?: info.videoStreams.maxByOrNull { it.height }
@@ -231,7 +370,12 @@ class MainActivity : AppCompatActivity() {
             ?: info.audioStreams.maxByOrNull { it.averageBitrate }
             ?: throw IllegalStateException("Не найден аудиопоток")
 
-        return Triple(bestVideo.content, bestAudio.content, "${bestVideo.height}p")
+        return ExtractedStreams(
+            videoUrl = bestVideo.content,
+            audioUrl = bestAudio.content,
+            resolution = "${bestVideo.height}p",
+            title = info.name ?: "YT_Video"
+        )
     }
 
     private fun downloadFile(fileUrl: String, dest: File) {
@@ -273,7 +417,6 @@ class MainActivity : AppCompatActivity() {
             val aTrackDst = muxer.addTrack(aFormat)
             muxer.start()
 
-            // Смещаемся к ближайшему ключевому кадру перед startUs
             videoExtractor.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             val actualStartUs = videoExtractor.sampleTime.coerceAtLeast(0L)
             audioExtractor.seekTo(actualStartUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
@@ -281,7 +424,6 @@ class MainActivity : AppCompatActivity() {
             val buffer = ByteBuffer.allocate(2 * 1024 * 1024)
             val bufferInfo = MediaCodec.BufferInfo()
 
-            // Копируем видео
             while (true) {
                 val sampleSize = videoExtractor.readSampleData(buffer, 0)
                 if (sampleSize < 0) break
@@ -296,7 +438,6 @@ class MainActivity : AppCompatActivity() {
                 videoExtractor.advance()
             }
 
-            // Копируем аудио с выравниванием по времени
             while (true) {
                 val sampleSize = audioExtractor.readSampleData(buffer, 0)
                 if (sampleSize < 0) break
@@ -313,7 +454,7 @@ class MainActivity : AppCompatActivity() {
                 audioExtractor.advance()
             }
         } finally {
-            try { muxer.stop() } catch (_: Exception) {}
+            try { muxer.stop() } catch (_: Throwable) {}
             muxer.release()
             videoExtractor.release()
             audioExtractor.release()
@@ -331,6 +472,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyToProjectivy(file: File) {
         val uri = FileProvider.getUriForFile(this, "$packageName.provider", file)
+
+        // Если приложение открыли из самого Projectivy для выбора файла — возвращаем результат напрямую
+        if (intent?.action == Intent.ACTION_GET_CONTENT || intent?.action == Intent.ACTION_PICK) {
+            val resultIntent = Intent().apply {
+                data = uri
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            setResult(Activity.RESULT_OK, resultIntent)
+            finish()
+            return
+        }
+
         val projectivyIntent = Intent(Intent.ACTION_ATTACH_DATA).apply {
             setDataAndType(uri, "video/mp4")
             setPackage("com.spocky.projengmenu")
@@ -338,12 +491,16 @@ class MainActivity : AppCompatActivity() {
         }
         try {
             startActivity(projectivyIntent)
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             val fallback = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, "video/mp4")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            startActivity(Intent.createChooser(fallback, "Выбери Projectivy Launcher"))
+            try {
+                startActivity(Intent.createChooser(fallback, "Выбери Projectivy Launcher"))
+            } catch (_: Throwable) {
+                updateStatus("Файл сохранён: ${file.absolutePath}. Выбери его в настройках обоев Projectivy.")
+            }
         }
     }
 
