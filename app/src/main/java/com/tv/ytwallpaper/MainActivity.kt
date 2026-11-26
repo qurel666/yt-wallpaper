@@ -1,20 +1,29 @@
 package com.tv.ytwallpaper
 
 import android.Manifest
-import android.app.Activity
 import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.media.MediaScannerConnection
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.Settings
+import android.text.Editable
+import android.text.TextUtils
+import android.text.TextWatcher
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.widget.*
@@ -38,6 +47,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import java.util.regex.Pattern
 
 class MainActivity : AppCompatActivity() {
 
@@ -47,10 +57,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var res1080Radio: RadioButton
     private lateinit var res1440Radio: RadioButton
     private lateinit var runButton: Button
+    private lateinit var cacheButton: Button
     private lateinit var statusText: TextView
-    private lateinit var historyContainer: LinearLayout
+    private lateinit var previewImage: ImageView
+    private lateinit var previewHint: TextView
+    private lateinit var gridContainer: LinearLayout
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var previewJob: Job? = null
+    private var lastPreviewId: String? = null
+
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
@@ -71,7 +87,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         buildTvUi()
-        refreshHistoryList()
+        refreshHistoryGrid()
+    }
+
+    private fun dp(value: Int): Int {
+        return TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP,
+            value.toFloat(),
+            resources.displayMetrics
+        ).toInt()
     }
 
     private fun getWallpapersDir(): File {
@@ -82,122 +106,231 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildTvUi() {
-        val scroll = ScrollView(this).apply {
-            setBackgroundColor(Color.parseColor("#121417"))
-            isFillViewport = true
-        }
-
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(56, 36, 56, 36)
-            gravity = Gravity.CENTER_HORIZONTAL
+            setBackgroundColor(Color.parseColor("#0F1216"))
+            setPadding(dp(26), dp(14), dp(26), dp(14))
         }
 
-        val title = TextView(this).apply {
-            text = "YouTube Видеообои для Projectivy (H.264 + Звук)"
-            textSize = 22f
-            setTextColor(Color.WHITE)
-            setPadding(0, 0, 0, 18)
-        }
-        root.addView(title)
-
-        urlInput = createInput("Вставь ссылку на YouTube (https://youtu.be/...)")
-        root.addView(urlInput)
-
-        val timeRow = LinearLayout(this).apply {
+        // === ВЕРХНЯЯ КОМПАКТНАЯ ЧАСТЬ + ПРЕВЬЮ В ПРАВОМ ВЕРХНЕМ УГЛУ ===
+        val topSection = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 12, 0, 12)
-        }
-        startInput = createInput("Начало (00:00)").apply {
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = 16
-            }
-        }
-        endInput = createInput("Конец (00:30)").apply {
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        timeRow.addView(startInput)
-        timeRow.addView(endInput)
-        root.addView(timeRow)
-
-        val radioGroup = RadioGroup(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 4, 0, 16)
-        }
-        res1080Radio = RadioButton(this).apply {
-            text = "1080p (Full HD, плавно на 2 ГБ ОЗУ)"
-            setTextColor(Color.WHITE)
-            textSize = 15f
-            isChecked = true
-            setPadding(0, 0, 32, 0)
-        }
-        res1440Radio = RadioButton(this).apply {
-            text = "1440p (2K)"
-            setTextColor(Color.WHITE)
-            textSize = 15f
-        }
-        radioGroup.addView(res1080Radio)
-        radioGroup.addView(res1440Radio)
-        root.addView(radioGroup)
-
-        runButton = Button(this).apply {
-            text = "СКАЧАТЬ, ОБРЕЗАТЬ И УСТАНОВИТЬ"
-            textSize = 16f
-            setTextColor(Color.WHITE)
-            setPadding(36, 18, 36, 18)
-            isFocusable = true
-            applyFocusStyle(this, "#2563EB", "#3B82F6")
-            setOnClickListener { startProcess() }
-        }
-        root.addView(runButton)
-
-        statusText = TextView(this).apply {
-            text = "Готово к работе. Папка: /Movies/ProjectivyWallpapers/"
-            textSize = 14f
-            setTextColor(Color.parseColor("#9CA3AF"))
-            setPadding(0, 18, 0, 20)
-        }
-        root.addView(statusText)
-
-        // Разделитель и заголовок истории
-        val historyTitle = TextView(this).apply {
-            text = "Последние 5 скачанных видео (нажми пультом для установки):"
-            textSize = 16f
-            setTextColor(Color.parseColor("#E5E7EB"))
+            gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
-                topMargin = 8
-                bottomMargin = 10
+                bottomMargin = dp(10)
             }
         }
-        root.addView(historyTitle)
 
-        historyContainer = LinearLayout(this).apply {
+        val controlsCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(16)
+            }
+        }
+
+        val title = TextView(this).apply {
+            text = "YT Обои ТВ — Видеообои для Projectivy"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, dp(6))
+        }
+        controlsCol.addView(title)
+
+        urlInput = createInput("Вставь ссылку на YouTube (https://youtu.be/...)").apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = dp(7)
+            }
+        }
+        urlInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                loadYoutubeThumbnail(s?.toString().orEmpty())
+            }
+        })
+        controlsCol.addView(urlInput)
+
+        // Компактная строка управления
+        val actionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
         }
-        root.addView(historyContainer)
 
-        scroll.addView(root)
-        setContentView(scroll)
+        startInput = createInput("00:00").apply {
+            hint = "Начало"
+            layoutParams = LinearLayout.LayoutParams(dp(90), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                marginEnd = dp(6)
+            }
+        }
+        endInput = createInput("00:30").apply {
+            hint = "Конец"
+            layoutParams = LinearLayout.LayoutParams(dp(90), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                marginEnd = dp(8)
+            }
+        }
+        actionRow.addView(startInput)
+        actionRow.addView(endInput)
+
+        val radioGroup = RadioGroup(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginEnd = dp(8)
+            }
+        }
+        res1080Radio = RadioButton(this).apply {
+            text = "1080p"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            isChecked = true
+            setPadding(0, 0, dp(6), 0)
+        }
+        res1440Radio = RadioButton(this).apply {
+            text = "1440p"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+        }
+        radioGroup.addView(res1080Radio)
+        radioGroup.addView(res1440Radio)
+        actionRow.addView(radioGroup)
+
+        runButton = Button(this).apply {
+            text = "СКАЧАТЬ И УСТАНОВИТЬ"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            isFocusable = true
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(8)
+            }
+            applyFocusStyle(this, "#2563EB", "#3B82F6")
+            setOnClickListener { startProcess() }
+        }
+        actionRow.addView(runButton)
+
+        cacheButton = Button(this).apply {
+            text = "КЭШ PROJECTIVY"
+            textSize = 11f
+            setTextColor(Color.parseColor("#E5E7EB"))
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            isFocusable = true
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            applyFocusStyle(this, "#1F2937", "#374151")
+            setOnClickListener { openProjectivySettings() }
+        }
+        actionRow.addView(cacheButton)
+
+        controlsCol.addView(actionRow)
+
+        statusText = TextView(this).apply {
+            text = "Выбери «YT Обои ТВ» в настройках обоев Projectivy"
+            textSize = 12f
+            setTextColor(Color.parseColor("#9CA3AF"))
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+            setPadding(0, dp(6), 0, 0)
+        }
+        controlsCol.addView(statusText)
+
+        topSection.addView(controlsCol)
+
+        // Правый верхний прямоугольник превью (16:9)
+        val previewBox = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(220), dp(124))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#181D24"))
+                cornerRadius = dp(10).toFloat()
+                setStroke(dp(2), Color.parseColor("#2D3748"))
+            }
+            clipToOutline = true
+        }
+
+        previewImage = ImageView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            scaleType = ImageView.ScaleType.CENTER_CROP
+        }
+        previewHint = TextView(this).apply {
+            text = "Превью видео"
+            textSize = 12f
+            setTextColor(Color.parseColor("#6B7280"))
+            gravity = Gravity.CENTER
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+        previewBox.addView(previewImage)
+        previewBox.addView(previewHint)
+        topSection.addView(previewBox)
+
+        root.addView(topSection)
+
+        // === ВЫДЕЛЕННАЯ НИЖНЯЯ ОБЛАСТЬ (6 ВИДЕО: 2 РЯДА ПО 3) ===
+        val bottomPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#161B22"))
+                cornerRadius = dp(12).toFloat()
+                setStroke(dp(2), Color.parseColor("#2B3544"))
+            }
+        }
+
+        val bottomHeader = TextView(this).apply {
+            text = "Последние 6 скачанных видео (нажми пультом, чтобы установить как обои)"
+            textSize = 13f
+            setTextColor(Color.parseColor("#E5E7EB"))
+            setPadding(dp(4), 0, 0, dp(6))
+        }
+        bottomPanel.addView(bottomHeader)
+
+        gridContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+        bottomPanel.addView(gridContainer)
+
+        root.addView(bottomPanel)
+        setContentView(root)
         urlInput.requestFocus()
     }
 
     private fun applyFocusStyle(view: View, normalHex: String, focusedHex: String) {
         val normalBg = GradientDrawable().apply {
             setColor(Color.parseColor(normalHex))
-            cornerRadius = 12f
-            setStroke(2, Color.parseColor("#374151"))
+            cornerRadius = dp(8).toFloat()
+            setStroke(dp(1), Color.parseColor("#374151"))
         }
         val focusedBg = GradientDrawable().apply {
             setColor(Color.parseColor(focusedHex))
-            cornerRadius = 12f
-            setStroke(4, Color.parseColor("#60A5FA"))
+            cornerRadius = dp(8).toFloat()
+            setStroke(dp(3), Color.parseColor("#60A5FA"))
         }
         view.background = normalBg
         view.setOnFocusChangeListener { v, hasFocus ->
@@ -210,72 +343,260 @@ class MainActivity : AppCompatActivity() {
             hint = hintText
             setHintTextColor(Color.parseColor("#6B7280"))
             setTextColor(Color.WHITE)
-            setPadding(22, 16, 22, 16)
-            textSize = 15f
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+            textSize = 12f
             isSingleLine = true
             isFocusable = true
-            applyFocusStyle(this, "#1F2937", "#263244")
+            applyFocusStyle(this, "#1E242D", "#263244")
         }
     }
 
-    private fun refreshHistoryList() {
-        historyContainer.removeAllViews()
+    private fun extractYoutubeId(url: String): String? {
+        val patterns = listOf(
+            "(?:v=|/)([0-9A-Za-z_-]{11}).*",
+            "youtu\\.be/([0-9A-Za-z_-]{11})",
+            "shorts/([0-9A-Za-z_-]{11})"
+        )
+        for (p in patterns) {
+            val m = Pattern.compile(p).matcher(url)
+            if (m.find()) return m.group(1)
+        }
+        return null
+    }
+
+    private fun loadYoutubeThumbnail(url: String) {
+        val videoId = extractYoutubeId(url.trim()) ?: return
+        if (videoId == lastPreviewId) return
+        lastPreviewId = videoId
+
+        previewJob?.cancel()
+        previewJob = scope.launch {
+            val bmp = withContext(Dispatchers.IO) {
+                try {
+                    val req = Request.Builder()
+                        .url("https://i.ytimg.com/vi/$videoId/hqdefault.jpg")
+                        .build()
+                    httpClient.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            resp.body?.byteStream()?.use { BitmapFactory.decodeStream(it) }
+                        } else null
+                    }
+                } catch (_: Throwable) {
+                    null
+                }
+            }
+            if (bmp != null) {
+                previewImage.setImageBitmap(bmp)
+                previewHint.visibility = View.GONE
+            }
+        }
+    }
+
+    private fun extractLocalVideoFrame(file: File): Bitmap? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            retriever.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                ?: retriever.frameAtTime
+        } catch (_: Throwable) {
+            null
+        } finally {
+            try { retriever.release() } catch (_: Throwable) {}
+        }
+    }
+
+    private fun refreshHistoryGrid() {
+        gridContainer.removeAllViews()
         val files = getWallpapersDir()
             .listFiles { f -> f.isFile && f.extension.equals("mp4", ignoreCase = true) }
             ?.sortedByDescending { it.lastModified() }
             ?: emptyList()
 
-        // Оставляем только 5 самых свежих, остальные удаляем
-        if (files.size > 5) {
-            files.drop(5).forEach { try { it.delete() } catch (_: Throwable) {} }
+        if (files.size > 6) {
+            files.drop(6).forEach { try { it.delete() } catch (_: Throwable) {} }
         }
 
-        val top5 = files.take(5)
-        if (top5.isEmpty()) {
+        val top6 = files.take(6)
+        if (top6.isEmpty()) {
             val emptyLabel = TextView(this).apply {
-                text = "Пока нет скачанных видео"
-                textSize = 14f
+                text = "Пока нет скачанных видео. Вставь ссылку выше и нажми «Скачать и установить»."
+                textSize = 13f
                 setTextColor(Color.parseColor("#6B7280"))
-                setPadding(16, 12, 16, 12)
+                gravity = Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.MATCH_PARENT
+                )
             }
-            historyContainer.addView(emptyLabel)
+            gridContainer.addView(emptyLabel)
             return
         }
 
+        val prefs = getSharedPreferences("yt_wallpaper_prefs", Context.MODE_PRIVATE)
+        val activeName = prefs.getString("active_file", top6.first().name)
         val dateFormat = SimpleDateFormat("dd.MM HH:mm", Locale.getDefault())
-        top5.forEachIndexed { index, file ->
-            val sizeMb = String.format(Locale.US, "%.1f МБ", file.length() / (1024.0 * 1024.0))
-            val dateStr = dateFormat.format(Date(file.lastModified()))
 
-            val itemBtn = TextView(this).apply {
-                text = "${index + 1}.  ${file.nameWithoutExtension}   •   $sizeMb   •   $dateStr"
-                textSize = 15f
-                setTextColor(Color.WHITE)
-                setPadding(24, 18, 24, 18)
-                isFocusable = true
-                isClickable = true
+        for (rowIndex in 0 until 2) {
+            val rowLayout = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
+                    0,
+                    1f
                 ).apply {
-                    bottomMargin = 10
+                    if (rowIndex == 0) bottomMargin = dp(8)
                 }
-                applyFocusStyle(this, "#1F2937", "#1D4ED8")
-                setOnClickListener { showVideoActionDialog(file) }
             }
-            historyContainer.addView(itemBtn)
+
+            for (colIndex in 0 until 3) {
+                val itemIdx = rowIndex * 3 + colIndex
+                val cellWrapper = FrameLayout(this).apply {
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply {
+                        if (colIndex < 2) marginEnd = dp(8)
+                    }
+                }
+
+                if (itemIdx < top6.size) {
+                    val file = top6[itemIdx]
+                    val isActive = file.name == activeName
+                    val card = createVideoCard(file, dateFormat, isActive)
+                    cellWrapper.addView(card)
+                }
+                rowLayout.addView(cellWrapper)
+            }
+            gridContainer.addView(rowLayout)
         }
+    }
+
+    private fun createVideoCard(file: File, dateFormat: SimpleDateFormat, isActive: Boolean): View {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            isFocusable = true
+            isClickable = true
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        val thumbView = ImageView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(92), dp(52)).apply {
+                marginEnd = dp(8)
+            }
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            setBackgroundColor(Color.parseColor("#11161D"))
+        }
+
+        var cachedThumb: Bitmap? = null
+        scope.launch {
+            val frame = withContext(Dispatchers.IO) { extractLocalVideoFrame(file) }
+            if (frame != null) {
+                cachedThumb = frame
+                thumbView.setImageBitmap(frame)
+            }
+        }
+
+        val infoCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+
+        val prefix = if (isActive) "★ " else ""
+        val nameText = TextView(this).apply {
+            text = "$prefix${file.nameWithoutExtension}"
+            textSize = 12f
+            setTextColor(if (isActive) Color.parseColor("#60A5FA") else Color.WHITE)
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+        }
+
+        val sizeMb = String.format(Locale.US, "%.1f МБ", file.length() / (1024.0 * 1024.0))
+        val metaText = TextView(this).apply {
+            text = "$sizeMb • ${dateFormat.format(Date(file.lastModified()))}"
+            textSize = 10f
+            setTextColor(Color.parseColor("#9CA3AF"))
+            setPadding(0, dp(3), 0, 0)
+        }
+
+        infoCol.addView(nameText)
+        infoCol.addView(metaText)
+
+        card.addView(thumbView)
+        card.addView(infoCol)
+
+        val normalBg = GradientDrawable().apply {
+            setColor(Color.parseColor("#1F2631"))
+            cornerRadius = dp(8).toFloat()
+            setStroke(dp(1), Color.parseColor(if (isActive) "#3B82F6" else "#334155"))
+        }
+        val focusedBg = GradientDrawable().apply {
+            setColor(Color.parseColor("#1E3A8A"))
+            cornerRadius = dp(8).toFloat()
+            setStroke(dp(3), Color.parseColor("#60A5FA"))
+        }
+        card.background = normalBg
+
+        card.setOnFocusChangeListener { v, hasFocus ->
+            v.background = if (hasFocus) focusedBg else normalBg
+            if (hasFocus && cachedThumb != null) {
+                previewImage.setImageBitmap(cachedThumb)
+                previewHint.visibility = View.GONE
+            }
+        }
+
+        card.setOnClickListener {
+            showVideoActionDialog(file)
+        }
+
+        return card
     }
 
     private fun showVideoActionDialog(file: File) {
         AlertDialog.Builder(this)
             .setTitle(file.nameWithoutExtension)
-            .setMessage("Установить это видео как обои в Projectivy Launcher?")
+            .setMessage("Установить это видео как обои в Projectivy?")
             .setPositiveButton("Установить как обои") { _, _ ->
-                applyToProjectivy(file)
+                setAsActiveWallpaper(file)
             }
             .setNegativeButton("Отмена", null)
             .show()
+    }
+
+    private fun setAsActiveWallpaper(file: File) {
+        getSharedPreferences("yt_wallpaper_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putString("active_file", file.name)
+            .apply()
+
+        refreshHistoryGrid()
+
+        val uri = FileProvider.getUriForFile(this, "$packageName.provider", file)
+        grantUriPermission("com.spocky.projengmenu", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+
+        updateStatus("Активные обои: ${file.nameWithoutExtension}. Если в Projectivy 4.74 не обновилось — нажми «КЭШ PROJECTIVY».")
+
+        val projectivyIntent = Intent(Intent.ACTION_ATTACH_DATA).apply {
+            setDataAndType(uri, "video/mp4")
+            setPackage("com.spocky.projengmenu")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivity(projectivyIntent)
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun openProjectivySettings() {
+        try {
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.parse("package:com.spocky.projengmenu")
+            }
+            startActivity(intent)
+        } catch (_: Throwable) {
+            updateStatus("Открой Настройки ТВ → Приложения → Projectivy Launcher → Очистить кэш")
+        }
     }
 
     private fun startProcess() {
@@ -313,7 +634,7 @@ class MainActivity : AppCompatActivity() {
                 val safeTitle = streamData.title
                     .replace(Regex("[^a-zA-Zа-яА-Я0-9_\\- ]"), "")
                     .trim()
-                    .take(28)
+                    .take(24)
                     .ifEmpty { "wallpaper" }
                 val stamp = SimpleDateFormat("HHmmss", Locale.getDefault()).format(Date())
                 val outFile = File(getWallpapersDir(), "${safeTitle}_$stamp.mp4")
@@ -330,9 +651,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 MediaScannerConnection.scanFile(this@MainActivity, arrayOf(outFile.absolutePath), arrayOf("video/mp4"), null)
-                refreshHistoryList()
-                updateStatus("Готово! Открываю установку обоев в Projectivy...")
-                applyToProjectivy(outFile)
+                setAsActiveWallpaper(outFile)
             } catch (t: Throwable) {
                 updateStatus("Ошибка: ${t.message ?: t.javaClass.simpleName}")
             } finally {
@@ -468,40 +787,6 @@ class MainActivity : AppCompatActivity() {
             if (mime.startsWith(mimePrefix)) return i
         }
         throw IllegalStateException("Дорожка $mimePrefix не найдена")
-    }
-
-    private fun applyToProjectivy(file: File) {
-        val uri = FileProvider.getUriForFile(this, "$packageName.provider", file)
-
-        // Если приложение открыли из самого Projectivy для выбора файла — возвращаем результат напрямую
-        if (intent?.action == Intent.ACTION_GET_CONTENT || intent?.action == Intent.ACTION_PICK) {
-            val resultIntent = Intent().apply {
-                data = uri
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            setResult(Activity.RESULT_OK, resultIntent)
-            finish()
-            return
-        }
-
-        val projectivyIntent = Intent(Intent.ACTION_ATTACH_DATA).apply {
-            setDataAndType(uri, "video/mp4")
-            setPackage("com.spocky.projengmenu")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        try {
-            startActivity(projectivyIntent)
-        } catch (_: Throwable) {
-            val fallback = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "video/mp4")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            try {
-                startActivity(Intent.createChooser(fallback, "Выбери Projectivy Launcher"))
-            } catch (_: Throwable) {
-                updateStatus("Файл сохранён: ${file.absolutePath}. Выбери его в настройках обоев Projectivy.")
-            }
-        }
     }
 
     private fun parseTimeToSeconds(input: String, defaultSec: Long): Long {
