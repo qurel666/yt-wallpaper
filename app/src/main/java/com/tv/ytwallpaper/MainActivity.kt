@@ -181,6 +181,9 @@ class MainActivity : AppCompatActivity() {
         actionRow.addView(startInput)
         actionRow.addView(endInput)
 
+        val id1080 = View.generateViewId()
+        val id1440 = View.generateViewId()
+
         val radioGroup = RadioGroup(this).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(
@@ -191,19 +194,21 @@ class MainActivity : AppCompatActivity() {
             }
         }
         res1080Radio = RadioButton(this).apply {
+            id = id1080
             text = "1080p"
             setTextColor(Color.WHITE)
             textSize = 12f
-            isChecked = true
             setPadding(0, 0, dp(6), 0)
         }
         res1440Radio = RadioButton(this).apply {
+            id = id1440
             text = "1440p"
             setTextColor(Color.WHITE)
             textSize = 12f
         }
         radioGroup.addView(res1080Radio)
         radioGroup.addView(res1440Radio)
+        radioGroup.check(id1080)
         actionRow.addView(radioGroup)
 
         runButton = Button(this).apply {
