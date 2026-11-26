@@ -66,7 +66,8 @@ class MainActivity : AppCompatActivity() {
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(90, TimeUnit.SECONDS)
+        .followRedirects(true)
         .build()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -91,10 +92,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getWallpapersDir(): File {
-        return File(
+        val publicDir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
             "ProjectivyWallpapers"
-        ).apply { mkdirs() }
+        )
+        if (publicDir.exists() || publicDir.mkdirs()) {
+            if (publicDir.canWrite()) return publicDir
+        }
+        return File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), "ProjectivyWallpapers").apply {
+            mkdirs()
+        }
     }
 
     private fun buildTvUi() {
@@ -349,7 +356,8 @@ class MainActivity : AppCompatActivity() {
             "youtu\\.be/([0-9A-Za-z_-]{11})",
             "[?&]v=([0-9A-Za-z_-]{11})",
             "shorts/([0-9A-Za-z_-]{11})",
-            "embed/([0-9A-Za-z_-]{11})"
+            "embed/([0-9A-Za-z_-]{11})",
+            "live/([0-9A-Za-z_-]{11})"
         )
         for (p in patterns) {
             val m = Pattern.compile(p).matcher(url)
@@ -622,14 +630,16 @@ class MainActivity : AppCompatActivity() {
                     extractStreamsDirect(videoId, targetHeight)
                 }
 
-                updateStatus("2/4 Скачиваю видео (${streamData.resolution} H.264)...")
+                updateStatus("2/4 Скачиваю видео (${streamData.resolution})...")
                 withContext(Dispatchers.IO) {
                     downloadFile(streamData.videoUrl, tempVideo, streamData.userAgent)
                 }
 
-                updateStatus("3/4 Скачиваю звук (AAC)...")
-                withContext(Dispatchers.IO) {
-                    downloadFile(streamData.audioUrl, tempAudio, streamData.userAgent)
+                if (streamData.audioUrl != null) {
+                    updateStatus("3/4 Скачиваю звук (AAC)...")
+                    withContext(Dispatchers.IO) {
+                        downloadFile(streamData.audioUrl, tempAudio, streamData.userAgent)
+                    }
                 }
 
                 val safeTitle = streamData.title
@@ -640,14 +650,14 @@ class MainActivity : AppCompatActivity() {
                 val stamp = SimpleDateFormat("HHmmss", Locale.getDefault()).format(Date())
                 val outFile = File(getWallpapersDir(), "${safeTitle}_$stamp.mp4")
 
-                updateStatus("4/4 Обрезаю (${startSec}с — ${endSec}с) и склеиваю со звуком...")
+                updateStatus("4/4 Обрезаю (${startSec}с — ${endSec}с) и сохраняю...")
                 withContext(Dispatchers.IO) {
                     trimAndMux(
-                        tempVideo.absolutePath,
-                        tempAudio.absolutePath,
-                        outFile.absolutePath,
-                        startSec * 1_000_000L,
-                        endSec * 1_000_000L
+                        videoPath = tempVideo.absolutePath,
+                        audioPath = if (streamData.audioUrl != null && tempAudio.exists()) tempAudio.absolutePath else null,
+                        outPath = outFile.absolutePath,
+                        startUs = startSec * 1_000_000L,
+                        endUs = endSec * 1_000_000L
                     )
                 }
 
@@ -665,7 +675,7 @@ class MainActivity : AppCompatActivity() {
 
     private data class ExtractedStreams(
         val videoUrl: String,
-        val audioUrl: String,
+        val audioUrl: String?,
         val resolution: String,
         val title: String,
         val userAgent: String
@@ -679,36 +689,104 @@ class MainActivity : AppCompatActivity() {
         val isAvc: Boolean
     )
 
+    private fun fetchVisitorData(userAgent: String, clientName: String, clientVersion: String): String? {
+        return try {
+            val payload = JSONObject().put(
+                "context",
+                JSONObject().put(
+                    "client",
+                    JSONObject()
+                        .put("clientName", clientName)
+                        .put("clientVersion", clientVersion)
+                        .put("hl", "ru")
+                        .put("gl", "RU")
+                )
+            )
+            val req = Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/visitor_id?prettyPrint=false")
+                .header("Content-Type", "application/json")
+                .header("User-Agent", userAgent)
+                .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use null
+                val raw = resp.body?.string() ?: return@use null
+                val json = JSONObject(raw)
+                json.optJSONObject("responseContext")?.optString("visitorData")?.takeIf { it.isNotEmpty() }
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     private fun extractStreamsDirect(videoId: String, maxHeight: Int): ExtractedStreams {
+        data class ClientProfile(
+            val name: String,
+            val id: String,
+            val version: String,
+            val userAgent: String,
+            val deviceMake: String?,
+            val deviceModel: String?,
+            val osName: String?,
+            val osVersion: String?,
+            val sdkVersion: Int?
+        )
+
         val clients = listOf(
-            Triple(
-                "ANDROID_VR",
-                "1.56.21",
-                "com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+            ClientProfile(
+                name = "ANDROID_VR",
+                id = "28",
+                version = "1.60.19",
+                userAgent = "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; Quest 3 Build/SQ3A.220605.009.A1) gzip",
+                deviceMake = "Oculus",
+                deviceModel = "Quest 3",
+                osName = "Android",
+                osVersion = "12L",
+                sdkVersion = 32
             ),
-            Triple(
-                "IOS",
-                "19.45.4",
-                "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)"
+            ClientProfile(
+                name = "IOS",
+                id = "5",
+                version = "20.10.4",
+                userAgent = "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_1 like Mac OS X;)",
+                deviceMake = "Apple",
+                deviceModel = "iPhone16,2",
+                osName = "iOS",
+                osVersion = "18.3.1.22D72",
+                sdkVersion = null
+            ),
+            ClientProfile(
+                name = "ANDROID_TESTSUITE",
+                id = "30",
+                version = "1.9",
+                userAgent = "com.google.android.youtube/1.9 (Linux; U; Android 11; en_US) gzip",
+                deviceMake = "Google",
+                deviceModel = "Pixel 5",
+                osName = "Android",
+                osVersion = "11",
+                sdkVersion = 30
             )
         )
 
-        var lastError = "Не удалось получить потоки"
+        var lastError = "Не удалось получить потоки с YouTube"
 
-        for ((clientName, clientVersion, userAgent) in clients) {
+        for (profile in clients) {
             try {
-                val clientId = if (clientName == "IOS") "5" else "28"
+                val visitorData = fetchVisitorData(profile.userAgent, profile.name, profile.version)
+
                 val clientObj = JSONObject().apply {
-                    put("clientName", clientName)
-                    put("clientVersion", clientVersion)
+                    put("clientName", profile.name)
+                    put("clientVersion", profile.version)
                     put("hl", "ru")
                     put("gl", "RU")
-                    if (clientName == "ANDROID_VR") {
-                        put("androidSdkVersion", 32)
-                    } else if (clientName == "IOS") {
-                        put("deviceModel", "iPhone16,2")
-                    }
+                    if (profile.deviceMake != null) put("deviceMake", profile.deviceMake)
+                    if (profile.deviceModel != null) put("deviceModel", profile.deviceModel)
+                    if (profile.osName != null) put("osName", profile.osName)
+                    if (profile.osVersion != null) put("osVersion", profile.osVersion)
+                    if (profile.sdkVersion != null) put("androidSdkVersion", profile.sdkVersion)
+                    if (!visitorData.isNullOrEmpty()) put("visitorData", visitorData)
                 }
+
                 val payload = JSONObject().apply {
                     put("videoId", videoId)
                     put("context", JSONObject().put("client", clientObj))
@@ -716,23 +794,34 @@ class MainActivity : AppCompatActivity() {
                     put("racyCheckOk", true)
                 }
 
-                val request = Request.Builder()
+                val reqBuilder = Request.Builder()
                     .url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
                     .header("Content-Type", "application/json")
-                    .header("User-Agent", userAgent)
-                    .header("X-YouTube-Client-Name", clientId)
-                    .header("X-YouTube-Client-Version", clientVersion)
+                    .header("User-Agent", profile.userAgent)
+                    .header("X-YouTube-Client-Name", profile.id)
+                    .header("X-YouTube-Client-Version", profile.version)
+
+                if (!visitorData.isNullOrEmpty()) {
+                    reqBuilder.header("X-Goog-Visitor-Id", visitorData)
+                }
+
+                val request = reqBuilder
                     .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
                     .build()
 
                 httpClient.newCall(request).execute().use { resp ->
+                    val bodyStr = resp.body?.string() ?: ""
                     if (!resp.isSuccessful) {
-                        lastError = "HTTP ${resp.code}"
+                        val apiMsg = try {
+                            JSONObject(bodyStr).optJSONObject("error")?.optString("message")
+                        } catch (_: Throwable) {
+                            null
+                        }
+                        lastError = if (!apiMsg.isNullOrEmpty()) "HTTP ${resp.code}: $apiMsg" else "HTTP ${resp.code}"
                         return@use
                     }
-                    val bodyStr = resp.body?.string() ?: return@use
-                    val root = JSONObject(bodyStr)
 
+                    val root = JSONObject(bodyStr)
                     val playability = root.optJSONObject("playabilityStatus")
                     val status = playability?.optString("status", "") ?: ""
                     if (status != "OK") {
@@ -741,8 +830,8 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     val title = root.optJSONObject("videoDetails")?.optString("title") ?: "YT_Video"
-                    val adaptive = root.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats")
-                        ?: return@use
+                    val streamingData = root.optJSONObject("streamingData") ?: return@use
+                    val adaptive = streamingData.optJSONArray("adaptiveFormats") ?: return@use
 
                     val videos = mutableListOf<StreamCandidate>()
                     val audios = mutableListOf<StreamCandidate>()
@@ -765,6 +854,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
 
+                    // Приоритет H.264 (avc1), так как чипы ТВ на Android 9 аппаратно декодируют его без тормозов
                     val avcVideos = videos.filter { it.isAvc }.ifEmpty { videos }
                     val bestVideo = avcVideos
                         .filter { it.height <= maxHeight }
@@ -773,13 +863,13 @@ class MainActivity : AppCompatActivity() {
 
                     val bestAudio = audios.maxByOrNull { it.bitrate }
 
-                    if (bestVideo != null && bestAudio != null) {
+                    if (bestVideo != null) {
                         return ExtractedStreams(
                             videoUrl = bestVideo.url,
-                            audioUrl = bestAudio.url,
+                            audioUrl = bestAudio?.url,
                             resolution = "${bestVideo.height}p",
                             title = title,
-                            userAgent = userAgent
+                            userAgent = profile.userAgent
                         )
                     }
                 }
@@ -795,6 +885,8 @@ class MainActivity : AppCompatActivity() {
         val request = Request.Builder()
             .url(fileUrl)
             .header("User-Agent", userAgent)
+            .header("Accept", "*/*")
+            .header("Accept-Encoding", "identity")
             .build()
         httpClient.newCall(request).execute().use { resp ->
             if (!resp.isSuccessful) throw IllegalStateException("Ошибка загрузки: HTTP ${resp.code}")
@@ -811,76 +903,99 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun trimAndMux(videoPath: String, audioPath: String, outPath: String, startUs: Long, endUs: Long) {
+    private fun trimAndMux(videoPath: String, audioPath: String?, outPath: String, startUs: Long, endUs: Long) {
         val videoExtractor = MediaExtractor().apply { setDataSource(videoPath) }
-        val audioExtractor = MediaExtractor().apply { setDataSource(audioPath) }
+        val audioExtractor = if (audioPath != null) MediaExtractor().apply { setDataSource(audioPath) } else null
         val muxer = MediaMuxer(outPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
 
         try {
             val vTrackSrc = selectTrack(videoExtractor, "video/")
-            val aTrackSrc = selectTrack(audioExtractor, "audio/")
-
             videoExtractor.selectTrack(vTrackSrc)
-            audioExtractor.selectTrack(aTrackSrc)
-
             val vFormat = videoExtractor.getTrackFormat(vTrackSrc)
-            val aFormat = audioExtractor.getTrackFormat(aTrackSrc)
-
             val vTrackDst = muxer.addTrack(vFormat)
-            val aTrackDst = muxer.addTrack(aFormat)
+
+            var aTrackSrc = -1
+            var aTrackDst = -1
+            if (audioExtractor != null) {
+                aTrackSrc = findTrack(audioExtractor, "audio/")
+                if (aTrackSrc >= 0) {
+                    audioExtractor.selectTrack(aTrackSrc)
+                    val aFormat = audioExtractor.getTrackFormat(aTrackSrc)
+                    aTrackDst = muxer.addTrack(aFormat)
+                }
+            }
+
             muxer.start()
 
             videoExtractor.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             val actualStartUs = videoExtractor.sampleTime.coerceAtLeast(0L)
-            audioExtractor.seekTo(actualStartUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
 
             val buffer = ByteBuffer.allocate(2 * 1024 * 1024)
             val bufferInfo = MediaCodec.BufferInfo()
 
+            var lastVideoPts = -1L
             while (true) {
                 val sampleSize = videoExtractor.readSampleData(buffer, 0)
                 if (sampleSize < 0) break
                 val sampleTime = videoExtractor.sampleTime
                 if (sampleTime > endUs) break
 
+                var pts = (sampleTime - actualStartUs).coerceAtLeast(0L)
+                if (pts <= lastVideoPts) pts = lastVideoPts + 1000L
+                lastVideoPts = pts
+
                 bufferInfo.offset = 0
                 bufferInfo.size = sampleSize
-                bufferInfo.presentationTimeUs = (sampleTime - actualStartUs).coerceAtLeast(0L)
+                bufferInfo.presentationTimeUs = pts
                 bufferInfo.flags = videoExtractor.sampleFlags
                 muxer.writeSampleData(vTrackDst, buffer, bufferInfo)
                 videoExtractor.advance()
             }
 
-            while (true) {
-                val sampleSize = audioExtractor.readSampleData(buffer, 0)
-                if (sampleSize < 0) break
-                val sampleTime = audioExtractor.sampleTime
-                if (sampleTime > endUs) break
+            if (audioExtractor != null && aTrackSrc >= 0 && aTrackDst >= 0) {
+                audioExtractor.seekTo(actualStartUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                var lastAudioPts = -1L
+                while (true) {
+                    val sampleSize = audioExtractor.readSampleData(buffer, 0)
+                    if (sampleSize < 0) break
+                    val sampleTime = audioExtractor.sampleTime
+                    if (sampleTime > endUs) break
 
-                if (sampleTime >= actualStartUs) {
-                    bufferInfo.offset = 0
-                    bufferInfo.size = sampleSize
-                    bufferInfo.presentationTimeUs = sampleTime - actualStartUs
-                    bufferInfo.flags = audioExtractor.sampleFlags
-                    muxer.writeSampleData(aTrackDst, buffer, bufferInfo)
+                    if (sampleTime >= actualStartUs) {
+                        var pts = sampleTime - actualStartUs
+                        if (pts <= lastAudioPts) pts = lastAudioPts + 1000L
+                        lastAudioPts = pts
+
+                        bufferInfo.offset = 0
+                        bufferInfo.size = sampleSize
+                        bufferInfo.presentationTimeUs = pts
+                        bufferInfo.flags = audioExtractor.sampleFlags
+                        muxer.writeSampleData(aTrackDst, buffer, bufferInfo)
+                    }
+                    audioExtractor.advance()
                 }
-                audioExtractor.advance()
             }
         } finally {
             try { muxer.stop() } catch (_: Throwable) {}
             muxer.release()
             videoExtractor.release()
-            audioExtractor.release()
+            try { audioExtractor?.release() } catch (_: Throwable) {}
         }
     }
 
-    private fun selectTrack(extractor: MediaExtractor, mimePrefix: String): Int {
+    private fun findTrack(extractor: MediaExtractor, mimePrefix: String): Int {
         for (i in 0 until extractor.trackCount) {
             val format = extractor.getTrackFormat(i)
             val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
             if (mime.startsWith(mimePrefix)) return i
         }
-        throw IllegalStateException("Дорожка $mimePrefix не найдена")
+        return -1
+    }
+
+    private fun selectTrack(extractor: MediaExtractor, mimePrefix: String): Int {
+        val idx = findTrack(extractor, mimePrefix)
+        if (idx < 0) throw IllegalStateException("Дорожка $mimePrefix не найдена")
+        return idx
     }
 
     private fun parseTimeToSeconds(input: String, defaultSec: Long): Long {
