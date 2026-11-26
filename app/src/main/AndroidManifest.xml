@@ -23,20 +23,27 @@
                 <category android:name="android.intent.category.LAUNCHER" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
-
-            <intent-filter>
-                <action android:name="android.intent.action.SET_WALLPAPER" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-
-            <intent-filter>
-                <action android:name="android.intent.action.GET_CONTENT" />
-                <action android:name="android.intent.action.PICK" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.OPENABLE" />
-                <data android:mimeType="video/*" />
-            </intent-filter>
         </activity>
+
+        <service
+            android:name=".WallpaperProviderService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="tv.projectivy.plugin.wallpaperprovider.api.WallpaperProviderService" />
+            </intent-filter>
+            <meta-data
+                android:name="apiVersion"
+                android:value="1" />
+            <meta-data
+                android:name="uuid"
+                android:value="c8a91e40-5b2d-4f1a-9c3e-7d6b8a1f2e3d" />
+            <meta-data
+                android:name="name"
+                android:value="YT Обои ТВ" />
+            <meta-data
+                android:name="settingsActivity"
+                android:value="com.tv.ytwallpaper.MainActivity" />
+        </service>
 
         <provider
             android:name="androidx.core.content.FileProvider"
