@@ -1,7 +1,6 @@
 import com.android.build.api.instrumentation.AsmClassVisitorFactory
 import com.android.build.api.instrumentation.ClassContext
 import com.android.build.api.instrumentation.ClassData
-import com.android.build.api.instrumentation.FramesComputationMode
 import com.android.build.api.instrumentation.InstrumentationParameters
 import com.android.build.api.instrumentation.InstrumentationScope
 import org.objectweb.asm.ClassVisitor
@@ -95,9 +94,6 @@ androidComponents {
             UrlDecoderFixFactory::class.java,
             InstrumentationScope.ALL
         ) {}
-        variant.instrumentation.setFramesComputationMode(
-            FramesComputationMode.COPY_FRAMES
-        )
     }
 }
 
